@@ -1,0 +1,8 @@
+google-genai
+beautifulsoup4
+requests
+lxml
+python-dotenv
+fastapi
+uvicorn
+pydantic

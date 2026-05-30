@@ -1,0 +1,36 @@
+[
+  {
+    "website_name": "Zoho",
+    "company_name": "Zoho",
+    "address": "",
+    "mobile_number": "+18339573953",
+    "mail": [
+      "sales@zohocorp.com",
+      "upgrade@zohocorp.com",
+      "renewal@zohocorp.com",
+      "cancellation@zohocorp.com",
+      "press@zohocorp.com"
+    ],
+    "core_service": "A comprehensive cloud software suite offering over 50 applications for end-to-end business needs, including CRM, finance, HR, sales, marketing, and customer service.",
+    "target_customer": "Businesses of all sizes, including startups, mid-sized companies, and enterprises, across various industries globally.",
+    "probable_pain_point": "Businesses often struggle with fragmented software solutions, inefficient workflows across different departments, and the complexity of managing multiple vendors for their operational needs.",
+    "outreach_opener": "Hi team, I noticed Zoho provides a powerful cloud software suite designed to cover end-to-end business needs, from sales and marketing to finance and HR."
+  },
+  {
+    "website_name": "Zoho",
+    "company_name": "Zoho",
+    "address": "",
+    "mobile_number": "+18339573953",
+    "mail": [
+      "sales@zohocorp.com",
+      "upgrade@zohocorp.com",
+      "renewal@zohocorp.com",
+      "cancellation@zohocorp.com",
+      "press@zohocorp.com"
+    ],
+    "core_service": "Unified cloud software suite with over 50 applications for end-to-end business needs, including CRM, mail, accounting, and customer service.",
+    "target_customer": "Businesses of all sizes, including startups, mid-sized companies, and enterprises, worldwide.",
+    "probable_pain_point": "Inefficient business operations due to disparate systems and a lack of integrated tools for sales, marketing, finance, and HR.",
+    "outreach_opener": "Hi team, I noticed Zoho provides a powerful cloud software suite designed to manage end-to-end business needs, from sales and marketing to finance and HR, for businesses of all sizes."
+  }
+]
