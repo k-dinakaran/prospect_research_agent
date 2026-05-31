@@ -1,7 +1,6 @@
 # ================================
-# 🏆 Hackathon Template Notebook
-# Prospect Research Agent
-# Subtask 1 — Research Pipeline
+# 🏆 Prospect Research Agent
+# Backend Enrichment Pipeline
 # ================================
 
 import os
@@ -21,13 +20,14 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
+
+# ========= ENV CONFIG =========
+
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# Gemini model
 MODEL_NAME = "gemini-2.5-flash"
 
-# Scraping limits
 REQUEST_TIMEOUT = 10
 MAX_RELEVANT_PAGES = 8
 MAX_CHARS_FOR_LLM = 12000
@@ -231,6 +231,80 @@ def extract_meta_text(html: str) -> str:
             if part and part.lower() not in seen:
                 seen.add(part.lower())
                 cleaned.append(part)
+
+        return "\n".join(cleaned)
+
+    except Exception:
+        return ""
+
+
+def extract_contact_signal_text_from_html(html: str) -> str:
+    """
+    Extract contact-heavy text before removing footer/header/form.
+
+    Many websites keep phone, email, and address inside:
+    - footer
+    - address tag
+    - contact section
+    - location section
+    - icon-based contact blocks
+    - mailto/tel links
+
+    This is generic extraction logic, not company-specific hardcoding.
+    """
+    if not html:
+        return ""
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        contact_chunks = []
+
+        # 1. Footer and address tags often contain phone/email/address.
+        for tag in soup.find_all(["footer", "address"]):
+            text = tag.get_text(" ", strip=True)
+            if text:
+                contact_chunks.append(text)
+
+        # 2. Elements with contact/location-related class or id.
+        contact_keywords = [
+            "contact", "footer", "address", "location", "phone",
+            "email", "mail", "reach", "get-in-touch", "call",
+            "office", "branch", "map"
+        ]
+
+        for tag in soup.find_all(True):
+            class_text = " ".join(tag.get("class", [])) if tag.get("class") else ""
+            id_text = tag.get("id", "") or ""
+            combined_attr = f"{class_text} {id_text}".lower()
+
+            if any(keyword in combined_attr for keyword in contact_keywords):
+                text = tag.get_text(" ", strip=True)
+                if text:
+                    contact_chunks.append(text)
+
+        # 3. Preserve mailto/tel values.
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "").strip()
+            href_lower = href.lower()
+
+            if href_lower.startswith(("mailto:", "tel:")):
+                contact_chunks.append(href)
+
+        # 4. Clean and dedupe.
+        cleaned = []
+        seen = set()
+
+        for chunk in contact_chunks:
+            chunk = re.sub(r"\s+", " ", chunk).strip()
+            if not chunk:
+                continue
+
+            key = chunk.lower()
+            if key in seen:
+                continue
+
+            seen.add(key)
+            cleaned.append(chunk)
 
         return "\n".join(cleaned)
 
@@ -701,9 +775,9 @@ def extract_phone_numbers(text: str) -> List[str]:
 
     phone_pattern = r"""
         (?:
-            (?:\+?\d{1,3}[\s\-().]*)?
-            (?:\(?\d{2,4}\)?[\s\-().]*)?
-            \d{3,4}[\s\-().]*\d{3,4}
+            (?:\+?\d{1,4}[\s\-().]*)?
+            (?:\(?\d{2,5}\)?[\s\-().]*)?
+            \d{3,5}[\s\-().]*\d{4,5}
         )
     """
 
@@ -715,7 +789,7 @@ def extract_phone_numbers(text: str) -> List[str]:
         n = n.strip(".,;:()[]{}<>")
         digits = re.sub(r"\D", "", n)
 
-        if len(digits) < 8 or len(digits) > 12:
+        if len(digits) < 8 or len(digits) > 15:
             continue
 
         if len(set(digits)) <= 2:
@@ -730,7 +804,12 @@ def extract_phone_numbers(text: str) -> List[str]:
 def extract_phone_numbers_with_context(text: str) -> List[str]:
     """
     Extract phone numbers only when nearby text suggests it is actually a phone number.
-    This prevents IDs/tracking numbers/random long numbers from becoming mobile_number.
+
+    Handles formats like:
+    - +044-35514488
+    - +91 98765 43210
+    - 044-35514488
+    - Phone: +044-35514488
     """
     if not text:
         return []
@@ -742,14 +821,14 @@ def extract_phone_numbers_with_context(text: str) -> List[str]:
     contact_keywords = [
         "phone", "tel", "telephone", "mobile", "call",
         "contact", "support", "sales", "talk to sales",
-        "customer care", "toll free"
+        "customer care", "toll free", "whatsapp"
     ]
 
     phone_pattern = r"""
         (?:
-            (?:\+?\d{1,3}[\s\-().]*)?
-            (?:\(?\d{2,4}\)?[\s\-().]*)?
-            \d{3,4}[\s\-().]*\d{3,4}
+            (?:\+?\d{1,4}[\s\-().]*)?
+            (?:\(?\d{2,5}\)?[\s\-().]*)?
+            \d{3,5}[\s\-().]*\d{4,5}
         )
     """
 
@@ -772,6 +851,7 @@ def extract_phone_numbers_with_context(text: str) -> List[str]:
 
             has_phone_format = any(symbol in phone for symbol in ["+", "(", ")", "-"])
 
+            # Accept if it has phone-like formatting OR nearby contact context.
             if not has_phone_format and not has_contact_context:
                 continue
 
@@ -825,13 +905,73 @@ def extract_contacts_from_html(html_blocks: List[str]) -> Dict[str, List[str]]:
 def extract_address_candidate(text: str) -> str:
     """
     Conservative address extraction.
-    Prefer address-like lines near strong business address keywords.
-    If unsure, return empty string.
+    Handles labeled and unlabeled address blocks.
+
+    This version also handles contact footer text like:
+    Phone: ... Email: ... Web: ... #151 Block, Area, City-600102. Country
+
+    No company-specific hardcoding.
     """
     if not text:
         return ""
 
-    lines = [clean_line(line) for line in text.splitlines() if clean_line(line)]
+    # Normalize text first
+    normalized_text = re.sub(r"\s+", " ", text).strip()
+
+    # Remove emails
+    normalized_text = re.sub(
+        r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+        " ",
+        normalized_text,
+    )
+
+    # Remove URLs / websites
+    normalized_text = re.sub(
+        r"\b(?:https?://)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s,]*)?",
+        " ",
+        normalized_text,
+    )
+
+    # Remove phone labels + phone-like values
+    normalized_text = re.sub(
+        r"(?i)\b(phone|tel|telephone|mobile|call|fax)\s*[:：]?\s*\+?[\d\s\-().]{7,20}",
+        " ",
+        normalized_text,
+    )
+
+    # Add breaks before likely address markers to help candidate segmentation
+    normalized_text = re.sub(r"(?=#\s*\d+)", "\n", normalized_text)
+    normalized_text = re.sub(r"(?i)(?=\b(?:door|plot|flat|suite|floor|block)\b)", "\n", normalized_text)
+
+    raw_lines = []
+    for line in text.splitlines():
+        raw_lines.append(clean_line(line))
+
+    # Also include normalized split lines
+    raw_lines.extend([clean_line(line) for line in normalized_text.splitlines()])
+
+    lines = []
+    seen = set()
+
+    for line in raw_lines:
+        if not line:
+            continue
+
+        # Remove common contact labels from the line
+        line = re.sub(
+            r"(?i)\b(phone|tel|telephone|mobile|call|email|mail|web|website)\s*[:：]\s*[^,|]+",
+            " ",
+            line,
+        )
+        line = re.sub(r"\s+", " ", line).strip(" ,.;:-")
+
+        if not line:
+            continue
+
+        key = line.lower()
+        if key not in seen:
+            seen.add(key)
+            lines.append(line)
 
     strong_address_keywords = [
         "headquarters",
@@ -850,43 +990,110 @@ def extract_address_candidate(text: str) -> str:
         "street", "st.", "road", "rd.", "avenue", "ave", "drive", "dr.",
         "lane", "ln", "boulevard", "blvd", "suite", "floor", "building",
         "parkway", "plaza", "industrial estate", "tower", "complex",
-        "nagar", "phase", "sector", "block", "center", "centre"
+        "nagar", "colony", "block", "sector", "phase", "center", "centre",
+        "district", "city", "state", "country", "plot", "door", "flat"
     ]
 
     candidates = []
 
     for i, line in enumerate(lines):
-        low = line.lower()
+        context_lines = lines[max(0, i - 2): min(len(lines), i + 3)]
+        context_text = " ".join(context_lines)
+        context_text = re.sub(r"\s+", " ", context_text).strip(" ,.;:")
+        context_low = context_text.lower()
 
-        has_address_token = any(token in low for token in address_tokens)
-        has_zip_like = bool(re.search(r"\b\d{5,6}(?:-\d{4})?\b", line))
-        has_number = bool(re.search(r"\b\d{1,5}\b", line))
+        has_address_token = any(token in context_low for token in address_tokens)
+        has_strong_context = any(keyword in context_low for keyword in strong_address_keywords)
 
-        if not (has_address_token and (has_number or has_zip_like)):
+        has_indian_pincode = bool(re.search(r"\b\d{6}\b", context_text))
+        has_us_zip = bool(re.search(r"\b\d{5}(?:-\d{4})?\b", context_text))
+        has_number_or_hash = bool(re.search(r"(#\s*\d+|\b\d{1,5}\b)", context_text))
+
+        bad_context = any(bad in context_low for bad in [
+            "copyright", "privacy", "terms", "invoice", "order id",
+            "tracking", "version", "blog", "case study", "testimonial",
+            "login", "signup"
+        ])
+
+        if bad_context:
             continue
 
-        context_window = " ".join(lines[max(0, i - 3): min(len(lines), i + 4)]).lower()
-        strong_context = any(keyword in context_window for keyword in strong_address_keywords)
+        labeled_address = has_strong_context and (
+            has_address_token or has_indian_pincode or has_us_zip
+        )
 
-        if strong_context:
-            chunk_parts = [line]
+        unlabeled_address = (
+            (has_indian_pincode or has_us_zip)
+            and has_address_token
+            and has_number_or_hash
+        )
 
-            if i + 1 < len(lines):
-                next_line = lines[i + 1]
-                if 5 < len(next_line) < 140 and not is_noise_line(next_line):
-                    chunk_parts.append(next_line)
+        if labeled_address or unlabeled_address:
+            candidate = context_text
 
-            candidate = ", ".join(chunk_parts)
-            candidate = candidate.strip(" ,.;:")
+            # Remove leftover contact fragments
+            candidate = re.sub(
+                r"(?i)\b(phone|tel|telephone|mobile|call|email|mail|web|website)\s*[:：]?\s*",
+                " ",
+                candidate,
+            )
 
-            if 15 <= len(candidate) <= 250:
+            candidate = re.sub(
+                r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+                " ",
+                candidate,
+            )
+
+            candidate = re.sub(
+                r"\b(?:https?://)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s,]*)?",
+                " ",
+                candidate,
+            )
+
+            candidate = re.sub(r"\s+", " ", candidate).strip(" ,.;:-")
+
+            if 20 <= len(candidate) <= 300:
+                candidates.append(candidate)
+
+    # Extra fallback: directly find an address-like segment with pincode/zip
+    fallback_patterns = [
+        r"(#\s*\d+[^.\n]{10,180}\b\d{6}\b[^.\n]{0,80})",
+        r"(\b\d{1,5}[^.\n]{10,180}\b\d{5}(?:-\d{4})?\b[^.\n]{0,80})",
+    ]
+
+    for pattern in fallback_patterns:
+        matches = re.findall(pattern, normalized_text, flags=re.IGNORECASE)
+
+        for match in matches:
+            candidate = re.sub(r"\s+", " ", match).strip(" ,.;:")
+            low = candidate.lower()
+
+            if any(token in low for token in address_tokens) and 20 <= len(candidate) <= 250:
                 candidates.append(candidate)
 
     if not candidates:
         return ""
 
-    candidates = sorted(candidates, key=len)
-    return candidates[0][:250]
+    # Deduplicate
+    unique_candidates = []
+    seen = set()
+
+    for candidate in candidates:
+        key = candidate.lower()
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(candidate)
+
+    # Prefer candidate with pincode/zip and shorter clean length.
+    unique_candidates = sorted(
+        unique_candidates,
+        key=lambda x: (
+            0 if re.search(r"\b\d{5,6}(?:-\d{4})?\b", x) else 1,
+            len(x)
+        )
+    )
+
+    return unique_candidates[0][:250]
 
 
 def extract_company_name_candidate(title: str, website_name: str) -> str:
@@ -918,7 +1125,7 @@ def extract_company_name_candidate(title: str, website_name: str) -> str:
 def scrape_company_context(url: str) -> Dict[str, Any]:
     """
     Scrape relevant pages and return compact evidence.
-    Includes fallback meta extraction for JS-heavy or thin pages.
+    Includes fallback meta extraction and contact signal preservation.
     """
     normalized_url = normalize_url(url)
 
@@ -930,6 +1137,7 @@ def scrape_company_context(url: str) -> Dict[str, Any]:
             "pages_scraped": [],
             "combined_text": "",
             "html_blocks": [],
+            "contact_signal_text": "",
             "debug_note": "Invalid URL",
         }
 
@@ -942,6 +1150,7 @@ def scrape_company_context(url: str) -> Dict[str, Any]:
     pages_scraped = []
     combined_blocks = []
     html_blocks = []
+    contact_signal_blocks = []
 
     for page_url in relevant_links:
         html = homepage_html if page_url.rstrip("/") == normalized_url.rstrip("/") else fetch_html(page_url)
@@ -950,6 +1159,10 @@ def scrape_company_context(url: str) -> Dict[str, Any]:
             continue
 
         html_blocks.append(html)
+
+        contact_signal = extract_contact_signal_text_from_html(html)
+        if contact_signal:
+            contact_signal_blocks.append(contact_signal)
 
         text = extract_clean_text(html)
         meta_text = extract_meta_text(html)
@@ -977,7 +1190,13 @@ def scrape_company_context(url: str) -> Dict[str, Any]:
 
         time.sleep(DELAY_BETWEEN_REQUESTS)
 
+    contact_signal_text = "\n".join(contact_signal_blocks)
     combined_text = "\n".join(combined_blocks)
+
+    # Put contact signals at the front so phone/address/email are not lost
+    # when main text is trimmed to MAX_CHARS_FOR_LLM.
+    if contact_signal_text:
+        combined_text = f"--- CONTACT SIGNALS ---\n{contact_signal_text}\n\n{combined_text}"
 
     if len(combined_text.strip()) < 300:
         fallback_parts = [
@@ -985,6 +1204,7 @@ def scrape_company_context(url: str) -> Dict[str, Any]:
             f"Domain: {get_domain(normalized_url)}",
             f"Page Title: {title}",
             f"Homepage Meta: {homepage_meta}",
+            f"Contact Signals: {contact_signal_text}",
         ]
 
         fallback_text = "\n".join([
@@ -1004,6 +1224,7 @@ def scrape_company_context(url: str) -> Dict[str, Any]:
         "pages_scraped": pages_scraped,
         "combined_text": combined_text,
         "html_blocks": html_blocks,
+        "contact_signal_text": contact_signal_text,
         "debug_note": f"Scraped {len(pages_scraped)} pages; evidence chars={len(combined_text)}",
     }
 
@@ -1011,8 +1232,8 @@ def scrape_company_context(url: str) -> Dict[str, Any]:
 # ========= GEMINI AI INSIGHTS =========
 
 def get_gemini_client():
-    if not API_KEY or API_KEY == "YOUR_GEMINI_API_KEY":
-        raise ValueError("Please set your Gemini API key in API_KEY.")
+    if not API_KEY:
+        raise ValueError("Please set GEMINI_API_KEY in your environment variables.")
 
     return genai.Client(api_key=API_KEY)
 
@@ -1202,6 +1423,7 @@ def enrich_company(url: str) -> dict:
 
         title = context.get("title", "")
         combined_text = context.get("combined_text", "")
+        contact_signal_text = context.get("contact_signal_text", "")
 
         print(f"[Debug] {normalized_url} -> {context.get('debug_note', '')}")
         print(f"[Debug] Pages scraped: {context.get('pages_scraped', [])}")
@@ -1209,8 +1431,11 @@ def enrich_company(url: str) -> dict:
         website_name = derive_name_from_url(normalized_url)
         company_name_candidate = extract_company_name_candidate(title, website_name)
 
-        emails_from_text = extract_emails(combined_text)
-        phones_from_text = extract_phone_numbers_with_context(combined_text)
+        # Use contact signals + cleaned evidence for deterministic extraction.
+        fact_text = f"{contact_signal_text}\n\n{combined_text}"
+
+        emails_from_text = extract_emails(fact_text)
+        phones_from_text = extract_phone_numbers_with_context(fact_text)
 
         html_contacts = extract_contacts_from_html(context.get("html_blocks", []))
 
@@ -1226,7 +1451,7 @@ def enrich_company(url: str) -> dict:
             if phone and phone not in phones:
                 phones.append(phone)
 
-        # Only use text phones if no tel: phone exists.
+        # Only use context-aware text phones if no tel: phone exists.
         if not phones:
             for phone in phones_from_text:
                 digits = re.sub(r"\D", "", phone)
@@ -1240,7 +1465,7 @@ def enrich_company(url: str) -> dict:
         emails = emails[:5]
         phones = phones[:3]
 
-        address = extract_address_candidate(combined_text)
+        address = extract_address_candidate(fact_text)
 
         deterministic_facts = {
             "website_name": website_name,
@@ -1274,12 +1499,11 @@ def enrich_company(url: str) -> dict:
         return empty_profile(url)
 
 
-# ========= INPUT PARSING =========
+# ========= OPTIONAL LOCAL CLI TEST =========
 
 def parse_url_array(raw_input_text: str) -> List[str]:
     """
-    Judges will paste JSON array.
-    This also supports Python-style list as fallback.
+    Supports manual CLI testing.
     """
     raw_input_text = raw_input_text.strip()
 
@@ -1305,8 +1529,6 @@ def parse_url_array(raw_input_text: str) -> List[str]:
 
     return urls
 
-
-# ========= MAIN EXECUTION =========
 
 if __name__ == "__main__":
 
